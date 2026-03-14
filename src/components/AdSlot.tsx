@@ -9,7 +9,8 @@ const VAST_PROXY_URL         = "/api/vast";
 interface Props { index: number; }
 
 export default function AdSlot({ index }: Props) {
-  const isVideo = index % 3 === 0;
+  // Every 3rd slot attempts VAST video — falls back to rec widget if no fill
+  const isVideoSlot = index % 3 === 0;
 
   return (
     <div className="relative w-full h-full bg-black flex flex-col items-center justify-center overflow-hidden">
@@ -19,39 +20,29 @@ export default function AdSlot({ index }: Props) {
         </span>
       </div>
 
-      {isVideo ? (
-        <VastPlayer />
+      {isVideoSlot ? (
+        // Try VAST — if no fill, renders 2× recommendation widgets as fallback
+        <VastOrFallback zoneId={RECOMMENDATION_ZONE_ID} index={index} />
       ) : (
-        <div className="w-full h-full flex flex-col overflow-y-auto">
-          <RecommendationWidget zoneId={RECOMMENDATION_ZONE_ID} instanceId={`${index}-a`} />
-          <RecommendationWidget zoneId={RECOMMENDATION_ZONE_ID} instanceId={`${index}-b`} />
-        </div>
+        <TwoRecWidgets zoneId={RECOMMENDATION_ZONE_ID} index={index} />
       )}
 
       {process.env.NODE_ENV === "development" && (
         <div className="absolute bottom-3 right-3 text-white/15 text-[10px] z-30 pointer-events-none">
-          slot #{index} · {isVideo ? "vast" : "2×rec"}
+          slot #{index} · {isVideoSlot ? "vast→rec" : "2×rec"}
         </div>
       )}
     </div>
   );
 }
 
-// ─── VAST Parser ───────────────────────────────────────────────────────────
-// Extracts text from a node, stripping CDATA wrappers
-function nodeText(el: Element | null): string {
-  if (!el) return "";
-  return (el.textContent || "").replace(/<!\[CDATA\[|\]\]>/g, "").trim();
-}
-
-// ─── VAST Player ───────────────────────────────────────────────────────────
-function VastPlayer() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [status, setStatus] = useState<"loading" | "ready" | "error" | "done">("loading");
-  const [src, setSrc]           = useState("");
-  const [clickUrl, setClickUrl] = useState("");
+// ─── VAST with recommendation fallback ────────────────────────────────────
+function VastOrFallback({ zoneId, index }: { zoneId: string; index: number }) {
+  const [mode, setMode] = useState<"loading" | "video" | "fallback">("loading");
+  const [vastData, setVastData] = useState<{ src: string; clickUrl: string } | null>(null);
   const [skippable, setSkippable] = useState(false);
   const [countdown, setCountdown] = useState(5);
+  const [done, setDone] = useState(false);
   const firedRef = useRef(false);
 
   useEffect(() => {
@@ -63,56 +54,36 @@ function VastPlayer() {
         if (!res.ok) throw new Error(`proxy ${res.status}`);
         const text = await res.text();
 
-        // Log trimmed XML for debugging
-        console.log("[VastPlayer] XML:", text.slice(0, 800));
+        const doc  = new DOMParser().parseFromString(text, "application/xml");
+        const ads  = doc.querySelectorAll("Ad");
 
-        const doc = new DOMParser().parseFromString(text, "application/xml");
-
-        // Check for empty VAST (no fill)
-        const ads = doc.querySelectorAll("Ad");
         if (ads.length === 0) {
-          console.warn("[VastPlayer] No Ad elements — no fill");
-          setStatus("done"); // hide slot silently
+          // No fill — show recommendation widgets instead of black screen
+          setMode("fallback");
           return;
         }
 
-        // Try all possible MediaFile selectors
-        // VAST 2/3/4 differ in nesting: Linear > MediaFiles > MediaFile
-        const allMediaFiles = Array.from(doc.querySelectorAll("MediaFile"));
-        console.log("[VastPlayer] MediaFile count:", allMediaFiles.length);
-        allMediaFiles.forEach((m, i) => {
-          console.log(`[VastPlayer] MediaFile[${i}] type=${m.getAttribute("type")} text="${nodeText(m).slice(0, 80)}"`);
-        });
+        const files = Array.from(doc.querySelectorAll("MediaFile"));
+        const mp4   = files.find(f => (f.getAttribute("type") || "").toLowerCase().includes("mp4")) || files[0];
+        const src   = (mp4?.textContent || "").replace(/<!\[CDATA\[|\]\]>/g, "").trim();
 
-        // Prefer MP4, fall back to first available
-        const mp4 = allMediaFiles.find(m =>
-          (m.getAttribute("type") || "").toLowerCase().includes("mp4")
-        ) || allMediaFiles[0];
+        if (!src) { setMode("fallback"); return; }
 
-        const videoSrc = nodeText(mp4);
-        if (!videoSrc) {
-          console.warn("[VastPlayer] MediaFile found but URL is empty");
-          setStatus("error");
-          return;
-        }
-
-        setSrc(videoSrc);
-        setStatus("ready");
-
-        // Click-through
-        const ct = doc.querySelector("ClickThrough");
-        if (ct) setClickUrl(nodeText(ct));
-
-        // Fire impression pixels
+        // Fire impressions
         if (!firedRef.current) {
           firedRef.current = true;
           doc.querySelectorAll("Impression").forEach(imp => {
-            const url = nodeText(imp);
+            const url = (imp.textContent || "").replace(/<!\[CDATA\[|\]\]>/g, "").trim();
             if (url) fetch(url).catch(() => {});
           });
         }
 
-        // Countdown
+        const ct = doc.querySelector("ClickThrough");
+        const clickUrl = ct ? (ct.textContent || "").replace(/<!\[CDATA\[|\]\]>/g, "").trim() : "";
+
+        setVastData({ src, clickUrl });
+        setMode("video");
+
         timer = setInterval(() => {
           setCountdown(c => {
             if (c <= 1) { clearInterval(timer); setSkippable(true); return 0; }
@@ -120,9 +91,8 @@ function VastPlayer() {
           });
         }, 1000);
 
-      } catch (err: any) {
-        console.warn("[VastPlayer] Error:", err?.message);
-        setStatus("error");
+      } catch {
+        setMode("fallback");
       }
     }
 
@@ -130,11 +100,8 @@ function VastPlayer() {
     return () => clearInterval(timer);
   }, []);
 
-  if (status === "error" || status === "done") {
-    return <div className="w-full h-full bg-black" />;
-  }
-
-  if (status === "loading") {
+  // ── Loading ──
+  if (mode === "loading") {
     return (
       <div className="w-full h-full bg-black flex items-center justify-center">
         <div className="w-7 h-7 border-2 border-white/15 border-t-white/60 rounded-full animate-spin" />
@@ -142,25 +109,29 @@ function VastPlayer() {
     );
   }
 
+  // ── Fallback: recommendation widgets ──
+  if (mode === "fallback" || done) {
+    return <TwoRecWidgets zoneId={zoneId} index={index} />;
+  }
+
+  // ── Video ad ──
   return (
     <div
       className="relative w-full h-full bg-black cursor-pointer"
-      onClick={() => clickUrl && window.open(clickUrl, "_blank", "noopener")}
+      onClick={() => vastData?.clickUrl && window.open(vastData.clickUrl, "_blank", "noopener")}
     >
       <video
-        ref={videoRef}
-        src={src}
+        src={vastData?.src}
         autoPlay
         playsInline
         className="w-full h-full object-contain"
-        onEnded={() => setStatus("done")}
-        onError={() => setStatus("error")}
+        onEnded={() => setDone(true)}
+        onError={() => setMode("fallback")}
       />
-
       <div className="absolute bottom-6 right-4 z-20">
         {skippable ? (
           <button
-            onClick={e => { e.stopPropagation(); setStatus("done"); }}
+            onClick={e => { e.stopPropagation(); setDone(true); }}
             className="bg-black/70 text-white text-xs px-3 py-1.5 rounded border border-white/30 hover:bg-white/20 transition"
           >
             Skip Ad ›
@@ -171,7 +142,6 @@ function VastPlayer() {
           </div>
         )}
       </div>
-
       <div className="absolute bottom-6 left-4 z-20 pointer-events-none">
         <span className="text-white/40 text-[10px] bg-black/50 px-2 py-0.5 rounded">Ad</span>
       </div>
@@ -179,7 +149,17 @@ function VastPlayer() {
   );
 }
 
-// ─── Recommendation Widget ─────────────────────────────────────────────────
+// ─── Two recommendation widgets ────────────────────────────────────────────
+function TwoRecWidgets({ zoneId, index }: { zoneId: string; index: number }) {
+  return (
+    <div className="w-full h-full flex flex-col overflow-y-auto">
+      <RecommendationWidget zoneId={zoneId} instanceId={`${index}-a`} />
+      <RecommendationWidget zoneId={zoneId} instanceId={`${index}-b`} />
+    </div>
+  );
+}
+
+// ─── Single recommendation widget ─────────────────────────────────────────
 function RecommendationWidget({ zoneId, instanceId }: { zoneId: string; instanceId: string }) {
   const ref    = useRef<HTMLDivElement>(null);
   const loaded = useRef(false);
