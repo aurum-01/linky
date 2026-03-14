@@ -77,5 +77,3 @@ linky/
 │   └── lib/
 │       └── customFetch.ts         # Core logic, API wrappers, and ranking math
 └── public/
-🤝 Contributing
-Contributions, issues, and feature requests are welcome! Feel free to check the issues page.
