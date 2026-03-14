@@ -1,5 +1,4 @@
 // src/components/VideoPlayer.tsx
-
 "use client";
 
 import { useEffect, useRef, useState, useCallback, memo } from "react";
@@ -15,35 +14,30 @@ function fmt(n: number): string {
 
 interface Props {
   video: StreamVideo;
-  token: string;
   isNext?: boolean;
+  isActive?: boolean;
 }
 
-function VideoPlayerInner({ video, token, isNext = false }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const iframeRef    = useRef<HTMLIFrameElement>(null);
-  const visibleRef   = useRef(false);
-
+function VideoPlayerInner({ video, isNext = false }: Props) {
+  const containerRef  = useRef<HTMLDivElement>(null);
+  const iframeRef     = useRef<HTMLIFrameElement>(null);
+  const visibleRef    = useRef(false);
   const [isMuted, setIsMuted] = useState(true);
   const [liked, setLiked]     = useState(false);
-  // Key increments to force iframe remount after chrome-error state
   const [iframeKey, setIframeKey] = useState(0);
   const errorCountRef = useRef(0);
 
+  // No token in iframe URL — /ifr/ handles its own auth as a first-party embed.
+  // Passing the server JWT breaks playback (valid_addr IP mismatch).
   const buildSrc = useCallback(
     (play: boolean, muted: boolean) =>
-      `${video.videoUrl}?autoplay=${play ? 1 : 0}&muted=${muted ? 1 : 0}&controls=0&loop=1${token ? `&token=${encodeURIComponent(token)}` : ""}`,
-    [video.videoUrl, token]
+      `${video.videoUrl}?autoplay=${play ? 1 : 0}&muted=${muted ? 1 : 0}&controls=0&loop=1`,
+    [video.videoUrl]
   );
 
-  // When the iframe enters an error state (chrome-error://) we must
-  // remount it entirely — you cannot navigate away from chrome-error via JS.
   const handleIframeError = useCallback(() => {
     errorCountRef.current += 1;
-    if (errorCountRef.current <= 3) {
-      // Force remount by changing key
-      setIframeKey((k) => k + 1);
-    }
+    if (errorCountRef.current <= 2) setIframeKey((k) => k + 1);
   }, []);
 
   useEffect(() => {
@@ -51,22 +45,17 @@ function VideoPlayerInner({ video, token, isNext = false }: Props) {
     const iframe    = iframeRef.current;
     if (!container || !iframe) return;
 
-    if (isNext) {
-      // Preload silently — autoplay=0 so it doesn't start playing
+    if (isNext && !visibleRef.current) {
       iframe.src = buildSrc(false, true);
     }
 
     const observer = new IntersectionObserver(
       ([entry]) => {
         const nowVisible = entry.isIntersecting;
-
         if (nowVisible && !visibleRef.current) {
           visibleRef.current = true;
-          // Reset error count when video becomes active
           errorCountRef.current = 0;
-          if (iframeRef.current) {
-            iframeRef.current.src = buildSrc(true, isMuted);
-          }
+          if (iframeRef.current) iframeRef.current.src = buildSrc(true, isMuted);
         } else if (!nowVisible && visibleRef.current) {
           visibleRef.current = false;
           if (iframeRef.current) {
@@ -74,15 +63,14 @@ function VideoPlayerInner({ video, token, isNext = false }: Props) {
           }
         }
       },
-      { threshold: 0.55 }
+      { threshold: 0.6 }
     );
 
     observer.observe(container);
     return () => observer.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isNext, buildSrc, iframeKey]); // iframeKey in deps ensures observer re-attaches after remount
+  }, [isNext, buildSrc, iframeKey]);
 
-  // After remount due to error, re-trigger play if still visible
   useEffect(() => {
     if (iframeKey > 0 && visibleRef.current && iframeRef.current) {
       iframeRef.current.src = buildSrc(true, isMuted);
@@ -90,12 +78,45 @@ function VideoPlayerInner({ video, token, isNext = false }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [iframeKey]);
 
+  // ── Audio fix ────────────────────────────────────────────────────────────
+  //
+  // Browser autoplay policy blocks audio unless the gesture originates
+  // inside the iframe's own browsing context. We can't do that with
+  // pointerEvents:none. The workaround:
+  //
+  // 1. On mute-button click, briefly re-enable pointerEvents on the iframe.
+  // 2. Reload iframe src with muted=0 AND autoplay=1.
+  //    Because the src change happens synchronously inside a click handler,
+  //    Chrome/Safari propagate the user-gesture token to the new navigation,
+  //    allowing audio playback.
+  // 3. After 600ms (enough time for the iframe to load and start playing),
+  //    restore pointerEvents:none so our overlay stays interactive.
+  //
   const handleMute = useCallback(() => {
+    const iframe = iframeRef.current;
+    if (!iframe || !visibleRef.current) {
+      setIsMuted((p) => !p);
+      return;
+    }
+
     setIsMuted((prev) => {
       const next = !prev;
-      if (visibleRef.current && iframeRef.current) {
-        iframeRef.current.src = buildSrc(true, next);
-      }
+
+      // Step 1: allow pointer events so the browser treats this as
+      // a user gesture on the iframe context
+      iframe.style.pointerEvents = "auto";
+
+      // Step 2: reload with new muted state — must happen synchronously
+      // within the click event to carry the gesture token
+      iframe.src = buildSrc(true, next);
+
+      // Step 3: restore after iframe has loaded
+      setTimeout(() => {
+        if (iframeRef.current) {
+          iframeRef.current.style.pointerEvents = "none";
+        }
+      }, 800);
+
       return next;
     });
   }, [buildSrc]);
@@ -105,16 +126,6 @@ function VideoPlayerInner({ video, token, isNext = false }: Props) {
   return (
     <div ref={containerRef} className="relative w-full h-full bg-black overflow-hidden">
 
-      {/*
-        Iframe is oversized (142% × 120%) and offset so RedGIFs'
-        own chrome (bottom bar, logo, side buttons) is clipped by
-        overflow:hidden on the parent. pointerEvents:none keeps our
-        overlay fully interactive.
-
-        key={iframeKey} forces a full DOM remount when the iframe
-        enters chrome-error:// state, which cannot be recovered from
-        via src assignment.
-      */}
       <iframe
         key={iframeKey}
         ref={iframeRef}
@@ -131,49 +142,38 @@ function VideoPlayerInner({ video, token, isNext = false }: Props) {
           height: "120%",
           top: "-7%",
           left: "-21%",
-          pointerEvents: "none",
+          pointerEvents: "none", // restored to this after mute toggle
         }}
       />
 
       {/* Gradients */}
-      <div className="absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/75 to-transparent z-10 pointer-events-none" />
-      <div className="absolute inset-x-0 bottom-0 h-[45%] bg-gradient-to-t from-black via-black/50 to-transparent z-10 pointer-events-none" />
+      <div className="absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/80 to-transparent z-10 pointer-events-none" />
+      <div className="absolute inset-x-0 bottom-0 h-[48%] bg-gradient-to-t from-black via-black/60 to-transparent z-10 pointer-events-none" />
 
-      {/* Bottom-left: author + title + tags + views */}
-      <div className="absolute bottom-8 left-4 right-[4.5rem] z-20 pointer-events-none space-y-1.5">
+      {/* Bottom info */}
+      <div className="absolute bottom-8 left-4 right-16 z-20 pointer-events-none space-y-1.5">
         <div className="flex items-center gap-2">
           {video.authorAvatar ? (
-            <img
-              src={video.authorAvatar}
-              alt={video.author}
-              className="w-7 h-7 rounded-full object-cover border border-white/20 shrink-0"
-            />
+            <img src={video.authorAvatar} alt={video.author} className="w-7 h-7 rounded-full object-cover border border-white/20 shrink-0" />
           ) : (
             <div className="w-7 h-7 rounded-full bg-gradient-to-br from-violet-500 to-pink-500 flex items-center justify-center text-white text-[11px] font-bold shrink-0">
               {video.author.charAt(0).toUpperCase()}
             </div>
           )}
-          <span className="text-white text-[13px] font-semibold drop-shadow truncate">
-            @{video.author}
-          </span>
+          <span className="text-white text-[13px] font-semibold drop-shadow truncate">@{video.author}</span>
           {video.niche && (
-            <span className="text-white/50 text-[11px] bg-white/10 px-1.5 py-0.5 rounded-full shrink-0 capitalize">
-              {video.niche}
+            <span className="text-white/50 text-[10px] bg-white/10 px-1.5 py-0.5 rounded-full shrink-0 capitalize border border-white/10">
+              {video.niche.replace(/-/g, " ")}
             </span>
           )}
         </div>
 
-        <p className="text-white text-[14px] font-medium leading-snug line-clamp-2 drop-shadow">
-          {video.title}
-        </p>
+        <p className="text-white text-[14px] font-medium leading-snug line-clamp-2 drop-shadow">{video.title}</p>
 
         {video.tags.length > 0 && (
           <div className="flex flex-wrap gap-1">
-            {video.tags.slice(0, 3).map((tag) => (
-              <span
-                key={tag}
-                className="text-white/60 text-[11px] bg-white/10 backdrop-blur-sm px-2 py-[2px] rounded-full border border-white/10"
-              >
+            {video.tags.slice(0, 4).map((tag) => (
+              <span key={tag} className="text-white/60 text-[11px] bg-white/10 backdrop-blur-sm px-2 py-[2px] rounded-full border border-white/10">
                 #{tag}
               </span>
             ))}
@@ -182,20 +182,14 @@ function VideoPlayerInner({ video, token, isNext = false }: Props) {
 
         {video.views > 0 && (
           <div className="flex items-center gap-1 text-white/40 text-[11px]">
-            <Eye size={10} />
-            <span>{fmt(video.views)}</span>
+            <Eye size={10} /><span>{fmt(video.views)} views</span>
           </div>
         )}
       </div>
 
-      {/* Right action bar */}
+      {/* Actions */}
       <div className="absolute right-2.5 bottom-10 z-20 flex flex-col items-center gap-4">
-
-        <button
-          onClick={() => setLiked((l) => !l)}
-          aria-label="Like"
-          className="flex flex-col items-center gap-0.5 cursor-pointer"
-        >
+        <button onClick={() => setLiked((l) => !l)} className="flex flex-col items-center gap-0.5 cursor-pointer">
           <div className={`p-2.5 rounded-full border backdrop-blur-md shadow-lg transition-all duration-150 active:scale-90 ${liked ? "bg-rose-500 border-rose-400" : "bg-white/10 border-white/15 hover:bg-white/20"}`}>
             <Heart size={22} className={liked ? "text-white fill-white" : "text-white"} />
           </div>
@@ -204,31 +198,26 @@ function VideoPlayerInner({ video, token, isNext = false }: Props) {
           )}
         </button>
 
-        <button onClick={handleMute} aria-label={isMuted ? "Unmute" : "Mute"} className="cursor-pointer">
-          <div className="p-2.5 rounded-full border border-white/15 bg-white/10 backdrop-blur-md shadow-lg hover:bg-white/20 transition-all duration-150 active:scale-90">
-            {isMuted ? <VolumeX size={22} className="text-white" /> : <Volume2 size={22} className="text-white" />}
+        {/* Mute button — see handleMute above for audio fix explanation */}
+        <button onClick={handleMute} className="cursor-pointer">
+          <div className="p-2.5 rounded-full border border-white/15 bg-white/10 backdrop-blur-md shadow-lg hover:bg-white/20 transition-all active:scale-90">
+            {isMuted
+              ? <VolumeX size={22} className="text-white" />
+              : <Volume2 size={22} className="text-white" />
+            }
           </div>
         </button>
 
-        <a
-          href={video.permalink}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="Open on RedGIFs"
-          className="cursor-pointer"
-        >
-          <div className="p-2.5 rounded-full border border-white/15 bg-white/10 backdrop-blur-md shadow-lg hover:bg-white/20 transition-all duration-150 active:scale-90">
+        <a href={video.permalink} target="_blank" rel="noopener noreferrer">
+          <div className="p-2.5 rounded-full border border-white/15 bg-white/10 backdrop-blur-md shadow-lg hover:bg-white/20 transition-all active:scale-90">
             <Share2 size={22} className="text-white" />
           </div>
         </a>
-
       </div>
     </div>
   );
 }
 
 export default memo(VideoPlayerInner, (prev, next) =>
-  prev.video.id === next.video.id &&
-  prev.token === next.token &&
-  prev.isNext === next.isNext
+  prev.video.id === next.video.id && prev.isNext === next.isNext
 );

@@ -1,4 +1,4 @@
-// ─── src/lib/redgifs/types.ts ──────────────────────────────────────────────
+// src/lib/redgifs/types.ts
 
 export interface StreamVideo {
   id: string;
@@ -6,13 +6,13 @@ export interface StreamVideo {
   author: string;
   authorAvatar: string;
   permalink: string;
-  videoUrl: string;      // always https://www.redgifs.com/ifr/{id}
+  videoUrl: string;
   views: number;
   likes: number;
-  score: number;         // pre-computed engagement score for ranking
+  score: number;
   tags: string[];
-  niche?: string;        // which niche this came from
-  isAd?: boolean;        // reserved for ad slots
+  niche?: string;
+  isAd?: boolean;
 }
 
 export interface RedgifsNiche {
@@ -36,5 +36,5 @@ export interface FetchResult {
 
 export interface RateLimitState {
   remaining: number;
-  resetAt: number; // ms epoch
+  resetAt: number;
 }
