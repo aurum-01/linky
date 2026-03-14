@@ -4,23 +4,15 @@
 import { useEffect, useRef, useState } from "react";
 
 const RECOMMENDATION_ZONE_ID = "5872222";
+const VAST_PROXY_URL         = "/api/vast";
 
-// We proxy the VAST through our own API to avoid CORS
-const VAST_PROXY_URL = "/api/vast";
-
-interface Props {
-  index: number;
-}
+interface Props { index: number; }
 
 export default function AdSlot({ index }: Props) {
-  // Every 3rd slot (0, 3, 6…) → VAST video
-  // All others → recommendation widget (2 per slot)
   const isVideo = index % 3 === 0;
 
   return (
     <div className="relative w-full h-full bg-black flex flex-col items-center justify-center overflow-hidden">
-
-      {/* Sponsored label */}
       <div className="absolute top-4 left-4 z-20 pointer-events-none">
         <span className="text-white/40 text-[10px] uppercase tracking-widest bg-white/5 border border-white/10 px-2 py-0.5 rounded-full">
           Sponsored
@@ -30,7 +22,6 @@ export default function AdSlot({ index }: Props) {
       {isVideo ? (
         <VastPlayer />
       ) : (
-        // Two recommendation widgets stacked — fills the full feed slot
         <div className="w-full h-full flex flex-col overflow-y-auto">
           <RecommendationWidget zoneId={RECOMMENDATION_ZONE_ID} instanceId={`${index}-a`} />
           <RecommendationWidget zoneId={RECOMMENDATION_ZONE_ID} instanceId={`${index}-b`} />
@@ -46,11 +37,18 @@ export default function AdSlot({ index }: Props) {
   );
 }
 
+// ─── VAST Parser ───────────────────────────────────────────────────────────
+// Extracts text from a node, stripping CDATA wrappers
+function nodeText(el: Element | null): string {
+  if (!el) return "";
+  return (el.textContent || "").replace(/<!\[CDATA\[|\]\]>/g, "").trim();
+}
+
 // ─── VAST Player ───────────────────────────────────────────────────────────
 function VastPlayer() {
-  const videoRef       = useRef<HTMLVideoElement>(null);
-  const [state, setState] = useState<"loading" | "playing" | "error" | "ended">("loading");
-  const [src, setSrc]        = useState("");
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "error" | "done">("loading");
+  const [src, setSrc]           = useState("");
   const [clickUrl, setClickUrl] = useState("");
   const [skippable, setSkippable] = useState(false);
   const [countdown, setCountdown] = useState(5);
@@ -61,42 +59,60 @@ function VastPlayer() {
 
     async function load() {
       try {
-        // Fetch VAST through our proxy (avoids CORS)
         const res = await fetch(VAST_PROXY_URL);
         if (!res.ok) throw new Error(`proxy ${res.status}`);
-
         const text = await res.text();
-        const doc  = new DOMParser().parseFromString(text, "text/xml");
 
-        // Parse error check
-        const parseErr = doc.querySelector("parsererror");
-        if (parseErr) throw new Error("Invalid VAST XML");
+        // Log trimmed XML for debugging
+        console.log("[VastPlayer] XML:", text.slice(0, 800));
 
-        // Find best MediaFile (prefer MP4)
-        const files = Array.from(doc.querySelectorAll("MediaFile"));
-        const mp4   = files.find(f => (f.getAttribute("type") || "").includes("mp4"))
-                   || files[0];
+        const doc = new DOMParser().parseFromString(text, "application/xml");
 
-        const videoSrc = mp4?.textContent?.trim().replace(/\s/g, "");
-        if (!videoSrc) throw new Error("No media file in VAST");
+        // Check for empty VAST (no fill)
+        const ads = doc.querySelectorAll("Ad");
+        if (ads.length === 0) {
+          console.warn("[VastPlayer] No Ad elements — no fill");
+          setStatus("done"); // hide slot silently
+          return;
+        }
+
+        // Try all possible MediaFile selectors
+        // VAST 2/3/4 differ in nesting: Linear > MediaFiles > MediaFile
+        const allMediaFiles = Array.from(doc.querySelectorAll("MediaFile"));
+        console.log("[VastPlayer] MediaFile count:", allMediaFiles.length);
+        allMediaFiles.forEach((m, i) => {
+          console.log(`[VastPlayer] MediaFile[${i}] type=${m.getAttribute("type")} text="${nodeText(m).slice(0, 80)}"`);
+        });
+
+        // Prefer MP4, fall back to first available
+        const mp4 = allMediaFiles.find(m =>
+          (m.getAttribute("type") || "").toLowerCase().includes("mp4")
+        ) || allMediaFiles[0];
+
+        const videoSrc = nodeText(mp4);
+        if (!videoSrc) {
+          console.warn("[VastPlayer] MediaFile found but URL is empty");
+          setStatus("error");
+          return;
+        }
 
         setSrc(videoSrc);
-        setState("playing");
+        setStatus("ready");
 
         // Click-through
         const ct = doc.querySelector("ClickThrough");
-        if (ct?.textContent) setClickUrl(ct.textContent.trim());
+        if (ct) setClickUrl(nodeText(ct));
 
-        // Fire impression pixels once
+        // Fire impression pixels
         if (!firedRef.current) {
           firedRef.current = true;
           doc.querySelectorAll("Impression").forEach(imp => {
-            const url = imp.textContent?.trim();
+            const url = nodeText(imp);
             if (url) fetch(url).catch(() => {});
           });
         }
 
-        // Skip countdown
+        // Countdown
         timer = setInterval(() => {
           setCountdown(c => {
             if (c <= 1) { clearInterval(timer); setSkippable(true); return 0; }
@@ -104,9 +120,9 @@ function VastPlayer() {
           });
         }, 1000);
 
-      } catch (err) {
-        console.warn("[VastPlayer]", err);
-        setState("error");
+      } catch (err: any) {
+        console.warn("[VastPlayer] Error:", err?.message);
+        setStatus("error");
       }
     }
 
@@ -114,11 +130,11 @@ function VastPlayer() {
     return () => clearInterval(timer);
   }, []);
 
-  if (state === "error" || state === "ended") {
+  if (status === "error" || status === "done") {
     return <div className="w-full h-full bg-black" />;
   }
 
-  if (state === "loading") {
+  if (status === "loading") {
     return (
       <div className="w-full h-full bg-black flex items-center justify-center">
         <div className="w-7 h-7 border-2 border-white/15 border-t-white/60 rounded-full animate-spin" />
@@ -137,15 +153,14 @@ function VastPlayer() {
         autoPlay
         playsInline
         className="w-full h-full object-contain"
-        onEnded={() => setState("ended")}
-        onError={() => setState("error")}
+        onEnded={() => setStatus("done")}
+        onError={() => setStatus("error")}
       />
 
-      {/* Skip control */}
       <div className="absolute bottom-6 right-4 z-20">
         {skippable ? (
           <button
-            onClick={e => { e.stopPropagation(); setState("ended"); }}
+            onClick={e => { e.stopPropagation(); setStatus("done"); }}
             className="bg-black/70 text-white text-xs px-3 py-1.5 rounded border border-white/30 hover:bg-white/20 transition"
           >
             Skip Ad ›
@@ -198,11 +213,11 @@ const _loaded = new Set<string>();
 function loadScript(src: string, onLoad: () => void) {
   if (_loaded.has(src)) { onLoad(); return; }
   _loaded.add(src);
-  const s       = document.createElement("script");
-  s.async       = true;
-  s.type        = "application/javascript";
+  const s = document.createElement("script");
+  s.async = true;
+  s.type  = "application/javascript";
   s.setAttribute("data-cfasync", "false");
-  s.src         = src;
-  s.onload      = onLoad;
+  s.src   = src;
+  s.onload = onLoad;
   document.head.appendChild(s);
 }

@@ -15,20 +15,18 @@ function fmt(n: number): string {
 interface Props {
   video: StreamVideo;
   isNext?: boolean;
-  isActive?: boolean;
 }
 
 function VideoPlayerInner({ video, isNext = false }: Props) {
-  const containerRef  = useRef<HTMLDivElement>(null);
-  const iframeRef     = useRef<HTMLIFrameElement>(null);
-  const visibleRef    = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const iframeRef    = useRef<HTMLIFrameElement>(null);
+  const visibleRef   = useRef(false);
   const [isMuted, setIsMuted] = useState(true);
   const [liked, setLiked]     = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
   const errorCountRef = useRef(0);
 
-  // No token in iframe URL — /ifr/ handles its own auth as a first-party embed.
-  // Passing the server JWT breaks playback (valid_addr IP mismatch).
+  // No token — /ifr/ handles its own auth as first-party embed
   const buildSrc = useCallback(
     (play: boolean, muted: boolean) =>
       `${video.videoUrl}?autoplay=${play ? 1 : 0}&muted=${muted ? 1 : 0}&controls=0&loop=1`,
@@ -45,6 +43,7 @@ function VideoPlayerInner({ video, isNext = false }: Props) {
     const iframe    = iframeRef.current;
     if (!container || !iframe) return;
 
+    // Preload next video silently (MUTED always — never autoplay with audio offscreen)
     if (isNext && !visibleRef.current) {
       iframe.src = buildSrc(false, true);
     }
@@ -52,24 +51,30 @@ function VideoPlayerInner({ video, isNext = false }: Props) {
     const observer = new IntersectionObserver(
       ([entry]) => {
         const nowVisible = entry.isIntersecting;
+
         if (nowVisible && !visibleRef.current) {
           visibleRef.current = true;
           errorCountRef.current = 0;
           if (iframeRef.current) iframeRef.current.src = buildSrc(true, isMuted);
+
         } else if (!nowVisible && visibleRef.current) {
           visibleRef.current = false;
+
           if (iframeRef.current) {
-            iframeRef.current.src = isNext ? buildSrc(false, true) : "about:blank";
+            // ALWAYS blank non-visible iframes — even the "next" one.
+            // This stops audio from playing in background when user scrolls past.
+            // The isNext preload is not worth the audio bleed tradeoff.
+            iframeRef.current.src = "about:blank";
           }
         }
       },
-      { threshold: 0.6 }
+      { threshold: 0.55 }
     );
 
     observer.observe(container);
     return () => observer.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isNext, buildSrc, iframeKey]);
+  }, [buildSrc, iframeKey]);
 
   useEffect(() => {
     if (iframeKey > 0 && visibleRef.current && iframeRef.current) {
@@ -78,45 +83,20 @@ function VideoPlayerInner({ video, isNext = false }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [iframeKey]);
 
-  // ── Audio fix ────────────────────────────────────────────────────────────
-  //
-  // Browser autoplay policy blocks audio unless the gesture originates
-  // inside the iframe's own browsing context. We can't do that with
-  // pointerEvents:none. The workaround:
-  //
-  // 1. On mute-button click, briefly re-enable pointerEvents on the iframe.
-  // 2. Reload iframe src with muted=0 AND autoplay=1.
-  //    Because the src change happens synchronously inside a click handler,
-  //    Chrome/Safari propagate the user-gesture token to the new navigation,
-  //    allowing audio playback.
-  // 3. After 600ms (enough time for the iframe to load and start playing),
-  //    restore pointerEvents:none so our overlay stays interactive.
-  //
+  // Audio fix: briefly allow pointer events so browser passes gesture to iframe context
   const handleMute = useCallback(() => {
     const iframe = iframeRef.current;
     if (!iframe || !visibleRef.current) {
       setIsMuted((p) => !p);
       return;
     }
-
     setIsMuted((prev) => {
       const next = !prev;
-
-      // Step 1: allow pointer events so the browser treats this as
-      // a user gesture on the iframe context
       iframe.style.pointerEvents = "auto";
-
-      // Step 2: reload with new muted state — must happen synchronously
-      // within the click event to carry the gesture token
       iframe.src = buildSrc(true, next);
-
-      // Step 3: restore after iframe has loaded
       setTimeout(() => {
-        if (iframeRef.current) {
-          iframeRef.current.style.pointerEvents = "none";
-        }
+        if (iframeRef.current) iframeRef.current.style.pointerEvents = "none";
       }, 800);
-
       return next;
     });
   }, [buildSrc]);
@@ -142,7 +122,7 @@ function VideoPlayerInner({ video, isNext = false }: Props) {
           height: "120%",
           top: "-7%",
           left: "-21%",
-          pointerEvents: "none", // restored to this after mute toggle
+          pointerEvents: "none",
         }}
       />
 
@@ -198,13 +178,9 @@ function VideoPlayerInner({ video, isNext = false }: Props) {
           )}
         </button>
 
-        {/* Mute button — see handleMute above for audio fix explanation */}
         <button onClick={handleMute} className="cursor-pointer">
           <div className="p-2.5 rounded-full border border-white/15 bg-white/10 backdrop-blur-md shadow-lg hover:bg-white/20 transition-all active:scale-90">
-            {isMuted
-              ? <VolumeX size={22} className="text-white" />
-              : <Volume2 size={22} className="text-white" />
-            }
+            {isMuted ? <VolumeX size={22} className="text-white" /> : <Volume2 size={22} className="text-white" />}
           </div>
         </button>
 
