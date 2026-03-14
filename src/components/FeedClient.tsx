@@ -111,7 +111,6 @@ export default function FeedClient({ initialVideos, prefs }: Props) {
                     i === activeIndex + 1 ||
                     (feedItems[activeIndex + 1]?.type === "ad" && i === activeIndex + 2)
                   }
-                  isActive={i === activeIndex}
                 />
               )}
             </div>
