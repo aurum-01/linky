@@ -1,135 +1,179 @@
+// src/components/VideoPlayer.tsx
+
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
-import { Volume2, VolumeX, Heart, Share2, Eye } from "lucide-react";
-import { StreamVideo } from "@/lib/customFetch";
+import { useEffect, useRef, useState, useCallback, memo } from "react";
+import { Heart, Share2, VolumeX, Volume2, Eye } from "lucide-react";
+import type { StreamVideo } from "@/lib/redgifs/types";
 
-function formatCount(n: number): string {
+function fmt(n: number): string {
   if (!n) return "";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
-  return n.toString();
+  return String(n);
 }
 
 interface Props {
   video: StreamVideo;
-  isActive: boolean;
-  shouldLoad: boolean;
-  isMuted: boolean;
-  onToggleMute: () => void;
+  token: string;
+  isNext?: boolean;
 }
 
-export default function VideoPlayer({ video, isActive, shouldLoad, isMuted, onToggleMute }: Props) {
-  const iframeRef = useRef<HTMLIFrameElement>(null);
+function VideoPlayerInner({ video, token, isNext = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [liked, setLiked] = useState(false);
-  const [heartAnim, setHeartAnim] = useState(false);
+  const iframeRef    = useRef<HTMLIFrameElement>(null);
+  const visibleRef   = useRef(false);
+
+  const [isMuted, setIsMuted] = useState(true);
+  const [liked, setLiked]     = useState(false);
+  // Key increments to force iframe remount after chrome-error state
+  const [iframeKey, setIframeKey] = useState(0);
+  const errorCountRef = useRef(0);
 
   const buildSrc = useCallback(
-    (autoplay: boolean, muted: boolean) =>
-      `${video.videoUrl}?autoplay=${autoplay ? 1 : 0}&muted=${muted ? 1 : 0}&controls=0&loop=1`,
-    [video.videoUrl]
+    (play: boolean, muted: boolean) =>
+      `${video.videoUrl}?autoplay=${play ? 1 : 0}&muted=${muted ? 1 : 0}&controls=0&loop=1${token ? `&token=${encodeURIComponent(token)}` : ""}`,
+    [video.videoUrl, token]
   );
 
-  // Sync React state directly to the iframe URL
-  useEffect(() => {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-
-    if (isActive) {
-      // If it's active, play it
-      iframe.src = buildSrc(true, isMuted);
-    } else if (shouldLoad) {
-      // If it's nearby but not active, pause it and pre-load
-      iframe.src = buildSrc(false, true);
-    } else {
-      // If it's far away, completely unload it from memory
-      iframe.src = "about:blank";
+  // When the iframe enters an error state (chrome-error://) we must
+  // remount it entirely — you cannot navigate away from chrome-error via JS.
+  const handleIframeError = useCallback(() => {
+    errorCountRef.current += 1;
+    if (errorCountRef.current <= 3) {
+      // Force remount by changing key
+      setIframeKey((k) => k + 1);
     }
-  }, [isActive, shouldLoad, isMuted, buildSrc]);
+  }, []);
 
-  const handleDoubleClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!liked) setLiked(true);
-    setHeartAnim(true);
-    setTimeout(() => setHeartAnim(false), 600);
-  };
+  useEffect(() => {
+    const container = containerRef.current;
+    const iframe    = iframeRef.current;
+    if (!container || !iframe) return;
+
+    if (isNext) {
+      // Preload silently — autoplay=0 so it doesn't start playing
+      iframe.src = buildSrc(false, true);
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        const nowVisible = entry.isIntersecting;
+
+        if (nowVisible && !visibleRef.current) {
+          visibleRef.current = true;
+          // Reset error count when video becomes active
+          errorCountRef.current = 0;
+          if (iframeRef.current) {
+            iframeRef.current.src = buildSrc(true, isMuted);
+          }
+        } else if (!nowVisible && visibleRef.current) {
+          visibleRef.current = false;
+          if (iframeRef.current) {
+            iframeRef.current.src = isNext ? buildSrc(false, true) : "about:blank";
+          }
+        }
+      },
+      { threshold: 0.55 }
+    );
+
+    observer.observe(container);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isNext, buildSrc, iframeKey]); // iframeKey in deps ensures observer re-attaches after remount
+
+  // After remount due to error, re-trigger play if still visible
+  useEffect(() => {
+    if (iframeKey > 0 && visibleRef.current && iframeRef.current) {
+      iframeRef.current.src = buildSrc(true, isMuted);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [iframeKey]);
+
+  const handleMute = useCallback(() => {
+    setIsMuted((prev) => {
+      const next = !prev;
+      if (visibleRef.current && iframeRef.current) {
+        iframeRef.current.src = buildSrc(true, next);
+      }
+      return next;
+    });
+  }, [buildSrc]);
 
   if (!video?.videoUrl) return null;
 
   return (
-    <div ref={containerRef} className="relative w-full h-full bg-black overflow-hidden flex items-center justify-center">
-      
-      {/* Blurred background layer for non-9:16 content */}
-      {video.posterUrl && (
-        <img 
-          src={video.posterUrl} 
-          alt="background"
-          className="absolute inset-0 w-full h-full object-cover blur-2xl opacity-40 scale-110 pointer-events-none"
-        />
-      )}
+    <div ref={containerRef} className="relative w-full h-full bg-black overflow-hidden">
 
-      {/* RedGIFs Official Iframe. 
-        Using iframe bypasses the 403 CDN Hotlink Protection.
-        We scale it up to crop out their UI elements.
+      {/*
+        Iframe is oversized (142% × 120%) and offset so RedGIFs'
+        own chrome (bottom bar, logo, side buttons) is clipped by
+        overflow:hidden on the parent. pointerEvents:none keeps our
+        overlay fully interactive.
+
+        key={iframeKey} forces a full DOM remount when the iframe
+        enters chrome-error:// state, which cannot be recovered from
+        via src assignment.
       */}
       <iframe
+        key={iframeKey}
         ref={iframeRef}
         src="about:blank"
         allowFullScreen
-        allow="autoplay; fullscreen"
+        allow="autoplay; fullscreen; encrypted-media"
         scrolling="no"
+        title={video.title}
+        onError={handleIframeError}
         style={{
           border: "none",
           position: "absolute",
-          width: "140%",
-          height: "118%",
-          top: "-6%",
-          left: "-20%",
-          pointerEvents: "none", // Prevent iframe from stealing our double-tap clicks
+          width: "142%",
+          height: "120%",
+          top: "-7%",
+          left: "-21%",
+          pointerEvents: "none",
         }}
       />
 
-      {/* Gradient overlays */}
-      <div className="absolute top-0 left-0 right-0 h-28 bg-gradient-to-b from-black/80 via-black/20 to-transparent z-20 pointer-events-none" />
-      <div className="absolute bottom-0 left-0 right-0 h-2/5 bg-gradient-to-t from-black/95 via-black/60 to-transparent z-20 pointer-events-none" />
+      {/* Gradients */}
+      <div className="absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-black/75 to-transparent z-10 pointer-events-none" />
+      <div className="absolute inset-x-0 bottom-0 h-[45%] bg-gradient-to-t from-black via-black/50 to-transparent z-10 pointer-events-none" />
 
-      {/* User Interaction Layer */}
-      <div 
-        className="absolute inset-0 z-30 cursor-pointer" 
-        onDoubleClick={handleDoubleClick}
-      />
-
-      {/* Double tap heart animation */}
-      <div className={`absolute inset-0 z-40 pointer-events-none flex items-center justify-center transition-all duration-500 ease-out ${
-          heartAnim ? 'opacity-100 scale-110' : 'opacity-0 scale-50'
-        }`}>
-        <Heart size={120} className="text-rose-500 fill-rose-500 drop-shadow-[0_0_30px_rgba(244,63,94,0.6)]" />
-      </div>
-
-      {/* Video Info Data */}
-      <div className="absolute bottom-8 left-4 right-24 z-30 pointer-events-none space-y-2">
+      {/* Bottom-left: author + title + tags + views */}
+      <div className="absolute bottom-8 left-4 right-[4.5rem] z-20 pointer-events-none space-y-1.5">
         <div className="flex items-center gap-2">
           {video.authorAvatar ? (
-            <img 
-              src={video.authorAvatar} 
+            <img
+              src={video.authorAvatar}
               alt={video.author}
-              className="w-8 h-8 rounded-full border border-white/30 object-cover shrink-0" 
+              className="w-7 h-7 rounded-full object-cover border border-white/20 shrink-0"
             />
           ) : (
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-pink-500 flex items-center justify-center text-white text-xs font-bold shrink-0">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-violet-500 to-pink-500 flex items-center justify-center text-white text-[11px] font-bold shrink-0">
               {video.author.charAt(0).toUpperCase()}
             </div>
           )}
-          <span className="text-white font-semibold text-sm drop-shadow-lg truncate">@{video.author}</span>
+          <span className="text-white text-[13px] font-semibold drop-shadow truncate">
+            @{video.author}
+          </span>
+          {video.niche && (
+            <span className="text-white/50 text-[11px] bg-white/10 px-1.5 py-0.5 rounded-full shrink-0 capitalize">
+              {video.niche}
+            </span>
+          )}
         </div>
 
-        <h2 className="text-white font-semibold text-[15px] leading-snug drop-shadow-lg line-clamp-2">{video.title}</h2>
+        <p className="text-white text-[14px] font-medium leading-snug line-clamp-2 drop-shadow">
+          {video.title}
+        </p>
 
-        {video.tags?.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
+        {video.tags.length > 0 && (
+          <div className="flex flex-wrap gap-1">
             {video.tags.slice(0, 3).map((tag) => (
-              <span key={tag} className="text-white/70 text-xs bg-white/10 backdrop-blur-sm px-2 py-0.5 rounded-full border border-white/10">
+              <span
+                key={tag}
+                className="text-white/60 text-[11px] bg-white/10 backdrop-blur-sm px-2 py-[2px] rounded-full border border-white/10"
+              >
                 #{tag}
               </span>
             ))}
@@ -137,36 +181,54 @@ export default function VideoPlayer({ video, isActive, shouldLoad, isMuted, onTo
         )}
 
         {video.views > 0 && (
-          <div className="flex items-center gap-1 text-white/40 text-xs">
-            <Eye size={11} />
-            <span>{formatCount(video.views)} views</span>
+          <div className="flex items-center gap-1 text-white/40 text-[11px]">
+            <Eye size={10} />
+            <span>{fmt(video.views)}</span>
           </div>
         )}
       </div>
 
-      {/* Side Action Buttons */}
-      <div className="absolute right-3 bottom-10 flex flex-col gap-4 items-center z-40">
-        <button onClick={() => setLiked((l) => !l)} className="flex flex-col items-center gap-1 cursor-pointer">
-          <div className={`p-3 backdrop-blur-lg rounded-full border shadow-lg transition-all duration-200 hover:scale-110 active:scale-95 ${liked ? "bg-rose-500/80 border-rose-400/50" : "bg-white/10 hover:bg-white/20 border-white/20"}`}>
-            <Heart size={24} className={`drop-shadow-md ${liked ? "text-white fill-white" : "text-white"}`} />
+      {/* Right action bar */}
+      <div className="absolute right-2.5 bottom-10 z-20 flex flex-col items-center gap-4">
+
+        <button
+          onClick={() => setLiked((l) => !l)}
+          aria-label="Like"
+          className="flex flex-col items-center gap-0.5 cursor-pointer"
+        >
+          <div className={`p-2.5 rounded-full border backdrop-blur-md shadow-lg transition-all duration-150 active:scale-90 ${liked ? "bg-rose-500 border-rose-400" : "bg-white/10 border-white/15 hover:bg-white/20"}`}>
+            <Heart size={22} className={liked ? "text-white fill-white" : "text-white"} />
           </div>
           {video.likes > 0 && (
-            <span className="text-white/60 text-[11px] font-medium">{formatCount(video.likes + (liked ? 1 : 0))}</span>
+            <span className="text-white/60 text-[10px] font-medium">{fmt(video.likes + (liked ? 1 : 0))}</span>
           )}
         </button>
 
-        <button onClick={onToggleMute} className="cursor-pointer">
-          <div className="p-3 bg-white/10 hover:bg-white/20 backdrop-blur-lg rounded-full border border-white/20 shadow-lg transition-all duration-200 hover:scale-110 active:scale-95">
-            {isMuted ? <VolumeX size={24} className="text-white" /> : <Volume2 size={24} className="text-white" />}
+        <button onClick={handleMute} aria-label={isMuted ? "Unmute" : "Mute"} className="cursor-pointer">
+          <div className="p-2.5 rounded-full border border-white/15 bg-white/10 backdrop-blur-md shadow-lg hover:bg-white/20 transition-all duration-150 active:scale-90">
+            {isMuted ? <VolumeX size={22} className="text-white" /> : <Volume2 size={22} className="text-white" />}
           </div>
         </button>
 
-        <a href={video.permalink} target="_blank" rel="noopener noreferrer" className="cursor-pointer">
-          <div className="p-3 bg-white/10 hover:bg-white/20 backdrop-blur-lg rounded-full border border-white/20 shadow-lg transition-all duration-200 hover:scale-110 active:scale-95">
-            <Share2 size={24} className="text-white" />
+        <a
+          href={video.permalink}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Open on RedGIFs"
+          className="cursor-pointer"
+        >
+          <div className="p-2.5 rounded-full border border-white/15 bg-white/10 backdrop-blur-md shadow-lg hover:bg-white/20 transition-all duration-150 active:scale-90">
+            <Share2 size={22} className="text-white" />
           </div>
         </a>
+
       </div>
     </div>
   );
 }
+
+export default memo(VideoPlayerInner, (prev, next) =>
+  prev.video.id === next.video.id &&
+  prev.token === next.token &&
+  prev.isNext === next.isNext
+);

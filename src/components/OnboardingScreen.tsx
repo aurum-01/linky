@@ -1,157 +1,205 @@
+// ─── src/components/OnboardingScreen.tsx ──────────────────────────────────
+
 "use client";
 
-import { useState, useEffect } from "react";
-import { UserPreferences, RedgifsNiche } from "@/lib/customFetch";
+import { useState } from "react";
+import { NICHE_EMOJI } from "@/lib/redgifs/niches";
+import type { RedgifsNiche, UserPreferences } from "@/lib/redgifs/types";
 
 const GENDER_OPTIONS = [
-  { key: "male", label: "Male", emoji: "👨" },
-  { key: "female", label: "Female", emoji: "👩" },
-  { key: "all", label: "Everyone", emoji: "🌈" },
-];
+  { key: "male",   emoji: "👨", label: "Male"     },
+  { key: "female", emoji: "👩", label: "Female"   },
+  { key: "all",    emoji: "🌈", label: "Everyone" },
+] as const;
+
+const MIN_NICHES = 3;
 
 interface Props {
+  niches: RedgifsNiche[];
   onComplete: (prefs: UserPreferences) => void;
 }
 
-export default function OnboardingScreen({ onComplete }: Props) {
-  const [step, setStep] = useState<"gender" | "loading" | "tags">("gender");
-  const [selectedGender, setSelectedGender] = useState<"male" | "female" | "all" | null>(null);
-  
-  const [dynamicTags, setDynamicTags] = useState<RedgifsNiche[]>([]);
-  const [selectedNiche, setSelectedNiche] = useState<string | null>(null);
+export default function OnboardingScreen({ niches, onComplete }: Props) {
+  const [step, setStep] = useState<"niches" | "gender">("niches");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [gender, setGender] = useState<UserPreferences["gender"] | null>(null);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem("linky_prefs");
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed.gender) setSelectedGender(parsed.gender);
-        if (parsed.niches && parsed.niches.length > 0) {
-          setSelectedNiche(parsed.niches[0]);
-        }
-      }
-    } catch (e) {
-      console.error("Failed to parse prefs", e);
-    }
-  }, []);
+  const toggle = (slug: string) =>
+    setSelected((prev) =>
+      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug]
+    );
 
-  const handleGenderSelect = async (gender: "male" | "female" | "all") => {
-    setSelectedGender(gender);
-    setStep("loading");
-
-    try {
-      const res = await fetch(`/api/tags?gender=${gender}`);
-      const data = await res.json();
-      setDynamicTags(data.tags || []);
-    } catch (err) {
-      console.error("Failed to fetch tags", err);
-    }
-
-    setStep("tags");
+  const handleNichesContinue = () => {
+    if (selected.length >= MIN_NICHES) setStep("gender");
   };
 
-  const complete = () => {
-    if (!selectedGender || !selectedNiche) return;
-    const prefs: UserPreferences = {
-      gender: selectedGender,
-      niches: [selectedNiche], // Strict 1 tag
-    };
+  const handleComplete = () => {
+    if (!gender) return;
+    const prefs: UserPreferences = { niches: selected, gender };
     localStorage.setItem("linky_prefs", JSON.stringify(prefs));
     onComplete(prefs);
   };
 
+  // Auto-advance to gender step when 3+ niches chosen
+  const canContinue = selected.length >= MIN_NICHES;
+
   return (
-    <div className="h-[100dvh] w-full overflow-y-auto bg-black flex flex-col items-center px-5 py-10">
-      <div className="text-center mb-10 shrink-0">
+    <div className="min-h-[100dvh] bg-black flex flex-col items-center px-5 py-10 overflow-y-auto">
+
+      {/* Logo */}
+      <div className="text-center mb-8 mt-2">
         <h1 className="text-4xl font-bold text-white tracking-tight">linky</h1>
-        <p className="text-white/40 text-sm">Your personalised feed</p>
+        <p className="text-white/30 text-sm mt-1">Your personalised feed</p>
       </div>
 
-      <div className="flex gap-2 mb-8 shrink-0">
-        <div className={`h-1 w-16 rounded ${step === "gender" ? "bg-white" : "bg-white/20"}`} />
-        <div className={`h-1 w-16 rounded ${step === "tags" ? "bg-white" : "bg-white/20"}`} />
+      {/* Step dots */}
+      <div className="flex gap-2 mb-8">
+        {["niches", "gender"].map((s) => (
+          <div
+            key={s}
+            className={`h-[3px] rounded-full transition-all duration-300 ${step === s ? "w-10 bg-white" : "w-5 bg-white/20"}`}
+          />
+        ))}
       </div>
 
-      {step === "gender" && (
-        <div className="w-full max-w-md pb-10">
-          <div className="text-center mb-8">
-            <h2 className="text-white text-xl font-semibold">Who are you?</h2>
-            <p className="text-white/40 text-sm">Helps us find the best content</p>
+      {/* ── Step 1: Niche picker ── */}
+      {step === "niches" && (
+        <div className="w-full max-w-md animate-fadeIn">
+          <div className="text-center mb-5">
+            <h2 className="text-white text-xl font-semibold">What are you into?</h2>
+            <p className="text-white/40 text-sm mt-0.5">
+              Pick at least {MIN_NICHES} — your feed will match
+            </p>
           </div>
 
-          <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-3 gap-2.5 mb-6">
+            {niches.map((niche) => {
+              const on = selected.includes(niche.slug);
+              return (
+                <button
+                  key={niche.slug}
+                  onClick={() => toggle(niche.slug)}
+                  className={`
+                    relative flex flex-col items-center gap-1.5 py-4 px-2 rounded-2xl border
+                    text-center transition-all duration-150 cursor-pointer select-none
+                    ${on
+                      ? "bg-white text-black border-white scale-[0.96]"
+                      : "bg-white/5 text-white border-white/10 hover:bg-white/10 active:scale-95"}
+                  `}
+                >
+                  {/* Cover image or emoji */}
+                  {niche.coverUrl ? (
+                    <div className="w-10 h-10 rounded-xl overflow-hidden shrink-0">
+                      <img src={niche.coverUrl} alt={niche.name} className="w-full h-full object-cover" />
+                    </div>
+                  ) : (
+                    <span className="text-2xl leading-none">{NICHE_EMOJI[niche.slug] || "🎬"}</span>
+                  )}
+                  <span className={`text-[12px] font-semibold leading-tight ${on ? "text-black" : "text-white"}`}>
+                    {niche.name}
+                  </span>
+
+                  {/* Checkmark */}
+                  {on && (
+                    <div className="absolute top-1.5 right-1.5 w-4 h-4 bg-black rounded-full flex items-center justify-center">
+                      <svg width="8" height="6" viewBox="0 0 8 6" fill="none">
+                        <path d="M1 3L3 5L7 1" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Counter + CTA */}
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-white/30 text-sm">
+              {selected.length} selected
+            </span>
+            <div className="flex gap-1">
+              {Array.from({ length: Math.min(selected.length, 8) }, (_, i) => (
+                <div key={i} className="w-1.5 h-1.5 rounded-full bg-white/60" />
+              ))}
+              {Array.from({ length: Math.max(0, MIN_NICHES - selected.length) }, (_, i) => (
+                <div key={i} className="w-1.5 h-1.5 rounded-full bg-white/15" />
+              ))}
+            </div>
+          </div>
+
+          <button
+            onClick={handleNichesContinue}
+            disabled={!canContinue}
+            className={`
+              w-full py-4 rounded-2xl font-semibold text-base transition-all duration-200
+              ${canContinue
+                ? "bg-white text-black hover:bg-white/90 active:scale-[0.98]"
+                : "bg-white/8 text-white/25 cursor-not-allowed"}
+            `}
+          >
+            {canContinue
+              ? `Continue with ${selected.length} topics →`
+              : `Choose ${MIN_NICHES - selected.length} more`}
+          </button>
+        </div>
+      )}
+
+      {/* ── Step 2: Gender picker ── */}
+      {step === "gender" && (
+        <div className="w-full max-w-md animate-fadeIn">
+          <div className="text-center mb-8">
+            <h2 className="text-white text-xl font-semibold">Who are you?</h2>
+            <p className="text-white/40 text-sm mt-0.5">Personalises your recommendations</p>
+          </div>
+
+          <div className="flex flex-col gap-3 mb-6">
             {GENDER_OPTIONS.map((opt) => {
-              const selected = selectedGender === opt.key;
+              const on = gender === opt.key;
               return (
                 <button
                   key={opt.key}
-                  onClick={() => handleGenderSelect(opt.key as any)}
+                  onClick={() => setGender(opt.key)}
                   className={`
-                    flex items-center gap-4 p-5 rounded-2xl border transition-all
-                    ${selected ? "bg-white text-black border-white" : "bg-white/5 text-white border-white/10 hover:bg-white/10"}
+                    flex items-center gap-4 px-5 py-4 rounded-2xl border transition-all duration-150 cursor-pointer
+                    ${on ? "bg-white text-black border-white" : "bg-white/5 text-white border-white/10 hover:bg-white/10"}
                   `}
                 >
                   <span className="text-3xl">{opt.emoji}</span>
                   <span className="font-semibold text-lg">{opt.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {step === "loading" && (
-        <div className="flex flex-col items-center justify-center flex-1 gap-4">
-          <div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-          <p className="text-white/40 text-sm">Finding top tags...</p>
-        </div>
-      )}
-
-      {step === "tags" && (
-        <div className="w-full max-w-md pb-10 flex flex-col items-center">
-          <div className="text-center mb-6">
-            <h2 className="text-white text-xl font-semibold">Pick one vibe</h2>
-            <p className="text-white/40 text-sm">Extracted from top trending</p>
-          </div>
-
-          <div className="grid grid-cols-3 gap-3 w-full">
-            {dynamicTags.map((niche) => {
-              const selected = selectedNiche === niche.slug;
-              return (
-                <button
-                  key={niche.slug}
-                  onClick={() => setSelectedNiche(niche.slug)}
-                  className={`
-                    flex items-center justify-center p-4 rounded-2xl border transition-all h-24
-                    ${selected ? "bg-white text-black border-white scale-95 shadow-lg shadow-white/20" : "bg-white/5 border-white/10 text-white hover:bg-white/10"}
-                  `}
-                >
-                  <span className="text-sm font-bold text-center capitalize">{niche.name}</span>
+                  {on && (
+                    <div className="ml-auto w-6 h-6 bg-black rounded-full flex items-center justify-center">
+                      <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+                        <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    </div>
+                  )}
                 </button>
               );
             })}
           </div>
 
-          <div className="mt-8 flex flex-col w-full gap-3 sticky bottom-4">
-            <button
-              onClick={() => setStep("gender")}
-              className="w-full py-3 text-white/40 text-sm underline"
-            >
-              ← Change Gender
-            </button>
-            <button
-              onClick={complete}
-              disabled={!selectedNiche}
-              className={`
-                w-full py-4 rounded-2xl font-semibold transition-all shadow-xl backdrop-blur-md
-                ${selectedNiche ? "bg-white text-black" : "bg-white/10 text-white/30"}
-              `}
-            >
-              Build my feed →
-            </button>
-          </div>
+          <button
+            onClick={handleComplete}
+            disabled={!gender}
+            className={`
+              w-full py-4 rounded-2xl font-semibold text-base transition-all duration-200
+              ${gender
+                ? "bg-white text-black hover:bg-white/90 active:scale-[0.98]"
+                : "bg-white/8 text-white/25 cursor-not-allowed"}
+            `}
+          >
+            Build my feed →
+          </button>
+
+          <button
+            onClick={() => setStep("niches")}
+            className="w-full mt-3 py-2 text-white/30 text-sm hover:text-white/60 transition-colors"
+          >
+            ← Back
+          </button>
         </div>
       )}
+
     </div>
   );
 }
